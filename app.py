@@ -1,9 +1,7 @@
 import streamlit as st
 import pandas as pd
-from surprise import Dataset, Reader
-from surprise import KNNBasic
-from surprise.model_selection import train_test_split
-from surprise import accuracy
+from lightfm import LightFM
+from lightfm import cross_validation
 
 # Fungsi untuk memuat dataset
 @st.cache_data
@@ -14,38 +12,34 @@ def load_data():
 # Fungsi untuk melatih model
 @st.cache_data
 def train_model(df):
-    # Rename kolom agar sesuai dengan Surprise
-    df_surprise = df.rename(columns={
-        "Age Rating": "user_id",  # Age Rating menggantikan user_id
-        "Title": "item_id",       # Title menggantikan item_id
-        "IMDb Rating": "rating"   # IMDb Rating tetap sebagai rating
-    })
+    # Memetakan film dan pengguna ke ID numerik
+    movie_ids = {movie: idx for idx, movie in enumerate(df['Title'].unique())}
+    user_ids = {user: idx for idx, user in enumerate(df['Age Rating'].unique())}
 
-    # Mengubah data ke format Surprise
-    reader = Reader(rating_scale=(df_surprise["rating"].min(), df_surprise["rating"].max()))
-    data = Dataset.load_from_df(df_surprise[["user_id", "item_id", "rating"]], reader)
-    
-    # Train-Test Split
-    trainset, testset = train_test_split(data, test_size=0.25)
-    
-    # Model dengan Collaborative Filtering
-    sim_options = {
-        "name": "cosine",
-        "user_based": True,  # Berbasis pengguna
-    }
-    algo = KNNBasic(sim_options=sim_options)
-    algo.fit(trainset)
-    
-    # Evaluasi Model
-    predictions = algo.test(testset)
-    rmse = accuracy.rmse(predictions)
-    
-    return algo, rmse
+    # Mengonversi data ke dalam bentuk sparse matrix
+    from scipy.sparse import coo_matrix
+
+    rows = df['Age Rating'].map(user_ids.get)
+    cols = df['Title'].map(movie_ids.get)
+    data = df['IMDb Rating']
+
+    matrix = coo_matrix((data, (rows, cols)), shape=(len(user_ids), len(movie_ids)))
+
+    # Melatih model LightFM
+    model = LightFM(loss='warp')
+    model.fit(matrix, epochs=30, num_threads=2)
+
+    return model, movie_ids, user_ids
 
 # Fungsi untuk memberikan rekomendasi
-def recommend(algo, user_id, movie_title):
-    pred = algo.predict(uid=user_id, iid=movie_title)
-    return pred.est
+def recommend(model, user_id, movie_ids, user_ids):
+    user_idx = user_ids.get(user_id)
+    if user_idx is None:
+        return None
+    scores = model.predict(user_idx, np.arange(len(movie_ids)))
+    top_movies = movie_ids.keys()
+    top_movie_ids = sorted(zip(scores, top_movies), reverse=True)[:5]
+    return [movie for score, movie in top_movie_ids]
 
 # Streamlit UI
 st.title("IMDb Top 250 Movie Recommender")
@@ -57,19 +51,21 @@ df = load_data()
 # Sidebar untuk memilih pengguna dan film
 st.sidebar.header("Input Data")
 user_id = st.sidebar.selectbox("Pilih Age Rating (User ID):", df["Age Rating"].unique())
-movie_title = st.sidebar.selectbox("Pilih Film (Item ID):", df["Title"].unique())
 
 # Train model
 with st.spinner("Melatih model..."):
-    algo, rmse = train_model(df)
+    model, movie_ids, user_ids = train_model(df)
 
-st.success(f"Model telah dilatih! RMSE: {rmse:.2f}")
+st.success("Model telah dilatih!")
 
 # Prediksi
-if st.sidebar.button("Prediksi Rating"):
-    with st.spinner("Memproses prediksi..."):
-        predicted_rating = recommend(algo, user_id, movie_title)
-    st.success(f"Prediksi rating untuk Age Rating '{user_id}' pada film '{movie_title}' adalah: {predicted_rating:.2f}")
+if st.sidebar.button("Rekomendasi Film"):
+    with st.spinner("Memproses rekomendasi..."):
+        recommendations = recommend(model, user_id, movie_ids, user_ids)
+    if recommendations:
+        st.success(f"Rekomendasi untuk '{user_id}': {', '.join(recommendations)}")
+    else:
+        st.error("Pengguna atau film tidak ditemukan.")
 
 # Tampilkan dataset
 if st.checkbox("Tampilkan dataset"):
